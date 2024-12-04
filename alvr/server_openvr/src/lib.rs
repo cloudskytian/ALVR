@@ -22,7 +22,7 @@ use alvr_common::{
     warn,
 };
 use alvr_filesystem as afs;
-use alvr_packets::{ButtonValue, Haptics};
+use alvr_packets::{ButtonValue, Haptics, ViewParams};
 use alvr_server_core::{HandType, ServerCoreContext, ServerCoreEvent};
 use alvr_session::{CodecType, ControllersConfig};
 use std::{
@@ -251,6 +251,17 @@ fn event_loop(events_receiver: mpsc::Receiver<ServerCoreEvent>) {
                                 ffi_body_tracker_motions.len() as i32,
                             )
                         };
+
+                        {
+                            let mut head_pose_queue_lock = HEAD_POSE_QUEUE.lock();
+
+                            head_pose_queue_lock
+                                .push_back((target_timestamp, predicted_head_motion.pose));
+
+                            if head_pose_queue_lock.len() > 1024 {
+                                head_pose_queue_lock.pop_front();
+                            }
+                        }
                     }
                 }
                 ServerCoreEvent::Buttons(entries) => {

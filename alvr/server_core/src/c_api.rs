@@ -8,7 +8,7 @@ use alvr_common::{
     AlvrCodecType, AlvrPose, AlvrViewParams, log,
     parking_lot::{Mutex, RwLock},
 };
-use alvr_packets::{ButtonEntry, ButtonValue, Haptics};
+use alvr_packets::{ButtonEntry, ButtonValue, Haptics, ViewParams};
 use alvr_session::CodecType;
 use std::{
     collections::{HashMap, VecDeque},
@@ -23,6 +23,48 @@ use std::{
 static SERVER_CORE_CONTEXT: RwLock<Option<ServerCoreContext>> = RwLock::new(None);
 static EVENTS_RECEIVER: Mutex<Option<mpsc::Receiver<ServerCoreEvent>>> = Mutex::new(None);
 static BUTTONS_QUEUE: Mutex<VecDeque<Vec<ButtonEntry>>> = Mutex::new(VecDeque::new());
+
+fn pose_to_capi(pose: &Pose) -> AlvrPose {
+    AlvrPose {
+        orientation: AlvrQuat {
+            x: pose.orientation.x,
+            y: pose.orientation.y,
+            z: pose.orientation.z,
+            w: pose.orientation.w,
+        },
+        position: pose.position.to_array(),
+    }
+}
+
+fn capi_to_pose(pose: &AlvrPose) -> Pose {
+    Pose {
+        orientation: Quat::from_xyzw(
+            pose.orientation.x,
+            pose.orientation.y,
+            pose.orientation.z,
+            pose.orientation.w,
+        ),
+        position: pose.position.into(),
+    }
+}
+
+fn fov_to_capi(fov: &Fov) -> AlvrFov {
+    AlvrFov {
+        left: fov.left,
+        right: fov.right,
+        up: fov.up,
+        down: fov.down,
+    }
+}
+
+fn capi_to_fov(fov: &AlvrFov) -> Fov {
+    Fov {
+        left: fov.left,
+        right: fov.right,
+        up: fov.up,
+        down: fov.down,
+    }
+}
 
 #[repr(C)]
 pub struct AlvrDeviceMotion {
@@ -56,6 +98,11 @@ pub struct AlvrBatteryInfo {
     /// range [0, 1]
     pub gauge_value: f32,
     pub is_plugged: bool,
+}
+
+pub struct AlvrViewParams {
+    pub pose: AlvrPose,
+    pub fov: AlvrFov,
 }
 
 #[repr(u8)]

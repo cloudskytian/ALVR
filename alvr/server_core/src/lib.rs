@@ -318,14 +318,12 @@ impl ServerCoreContext {
     pub fn get_tracker_pose_time_offset(&self) -> Duration {
         dbg_server_core!("get_tracker_pose_time_offset");
 
-        // self.connection_context
-        //     .statistics_manager
-        //     .read()
-        //     .as_ref()
-        //     .map(|stats| stats.tracker_pose_time_offset())
-        //     .unwrap_or_default()
-
-        Duration::from_millis(0)
+        self.connection_context
+            .statistics_manager
+            .read()
+            .as_ref()
+            .map(|stats| stats.tracker_pose_time_offset())
+            .unwrap_or_default()
     }
 
     pub fn send_haptics(&self, haptics: Haptics) {

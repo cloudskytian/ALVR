@@ -321,7 +321,14 @@ fn connection_pipeline(
                         .as_mut()
                         .is_some_and(|callback| callback(header.timestamp, nal));
 
-                    if !submitted {
+                    if submitted {
+                        let view_params_lock = &mut *ctx.view_params_queue.write();
+                        view_params_lock.push_back((header.timestamp, header.views_params));
+
+                        if view_params_lock.len() > 1024 {
+                            view_params_lock.pop_front();
+                        }
+                    } else {
                         stream_corrupted = true;
                         if let Some(sender) = &mut *ctx.control_sender.lock() {
                             sender.send(&ClientControlPacket::RequestIdr).ok();
