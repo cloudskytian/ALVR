@@ -16,20 +16,20 @@ use alvr_common::{
     BODY_CHEST_ID, BODY_HIPS_ID, BODY_LEFT_ELBOW_ID, BODY_LEFT_FOOT_ID, BODY_LEFT_KNEE_ID,
     BODY_RIGHT_ELBOW_ID, BODY_RIGHT_FOOT_ID, BODY_RIGHT_KNEE_ID, ConnectionError,
     DEVICE_ID_TO_PATH, DeviceMotion, HAND_LEFT_ID, HAND_RIGHT_ID, HEAD_ID, Pose, ViewParams,
-    glam::{Quat, Vec3},
+    glam::{Quat, Vec2, Vec3},
     parking_lot::Mutex,
 };
 use alvr_events::{EventType, TrackingEvent};
 use alvr_packets::TrackingData;
 use alvr_session::{
-    BodyTrackingConfig, HeadsetConfig, PositionRecenteringMode, RotationRecenteringMode, Settings,
-    VMCConfig, settings_schema::Switch,
+    BodyTrackingConfig, HeadsetConfig, RecenteringMode, Settings, VMCConfig,
+    settings_schema::Switch,
 };
 use alvr_sockets::StreamReceiver;
 use std::{
     cmp::Ordering,
     collections::{HashMap, VecDeque},
-    f32::consts::PI,
+    f32::consts::{FRAC_PI_2, FRAC_PI_4, PI},
     sync::Arc,
     time::Duration,
 };
@@ -55,6 +55,7 @@ pub struct TrackingManager {
     last_head_pose: Pose,             // client's reference space
     inverse_recentering_origin: Pose, // client's reference space
     device_motions_history: HashMap<u64, VecDeque<(Duration, DeviceMotion)>>,
+    markers: HashMap<String, Pose>,
     hand_skeletons_history: [VecDeque<(Duration, [Pose; 26])>; 2],
     max_history_size: usize,
 }
@@ -65,48 +66,101 @@ impl TrackingManager {
             last_head_pose: Pose::IDENTITY,
             inverse_recentering_origin: Pose::IDENTITY,
             device_motions_history: HashMap::new(),
+            markers: HashMap::new(),
             hand_skeletons_history: [VecDeque::new(), VecDeque::new()],
             max_history_size,
         }
     }
 
-    pub fn recenter(
-        &mut self,
-        position_recentering_mode: PositionRecenteringMode,
-        rotation_recentering_mode: RotationRecenteringMode,
-    ) {
-        let position = match position_recentering_mode {
-            PositionRecenteringMode::Disabled => Vec3::ZERO,
-            PositionRecenteringMode::LocalFloor => {
-                let mut pos = self.last_head_pose.position;
-                pos.y = 0.0;
+    pub fn recenter(&mut self, mode: &RecenteringMode) {
+        let recentering_origin = match mode {
+            RecenteringMode::Stage {
+                marker_based_colocation,
+            } => {
+                if let Some(colocation_config) = marker_based_colocation.as_option() {
+                    if let Some(marker_pose) = self.markers.get(&colocation_config.qr_code_string) {
+                        // Detect if the marker is vertical or horizontal, and use two different
+                        // robust methods to extract the recentering orientation.
+                        let marker_z_axis = marker_pose.orientation * Vec3::Z;
+                        let angle_from_y = Vec3::angle_between(marker_z_axis, Vec3::Y);
 
-                pos
-            }
-            PositionRecenteringMode::Local { view_height } => {
-                self.last_head_pose.position - Vec3::new(0.0, view_height, 0.0)
-            }
-        };
+                        let orientation = if (angle_from_y - FRAC_PI_2).abs() < FRAC_PI_4 {
+                            // The marker is vertical
+                            let y_angle = Vec2::new(marker_z_axis.x, marker_z_axis.z)
+                                .normalize()
+                                .angle_to(Vec2::Y); // (this Y is on the XZ plane -> Z)
+                            Quat::from_rotation_y(y_angle)
+                        } else {
+                            let marker_x_axis = marker_pose.orientation * Vec3::X;
+                            let y_angle = Vec2::new(marker_x_axis.x, marker_x_axis.z)
+                                .normalize()
+                                .angle_to(Vec2::X);
+                            Quat::from_rotation_y(y_angle)
+                        };
 
-        let orientation = match rotation_recentering_mode {
-            RotationRecenteringMode::Disabled => Quat::IDENTITY,
-            RotationRecenteringMode::Yaw => {
-                let mut rot = self.last_head_pose.orientation;
+                        let position = {
+                            let marker_offset_2d = Vec3::new(
+                                colocation_config.floor_offset[0],
+                                0.0,
+                                colocation_config.floor_offset[1],
+                            );
+                            let marker_position_2d =
+                                Vec3::new(marker_pose.position.x, 0.0, marker_pose.position.z);
+
+                            marker_position_2d - marker_offset_2d
+                        };
+
+                        Pose {
+                            position,
+                            orientation,
+                        }
+                    } else {
+                        // In case the marker is not found, abort recentering, we still want to use
+                        // the last marker recentering origin.
+                        return;
+                    }
+                } else {
+                    // In case marker-based colocation is not enabled, we want to reset the
+                    // recentered origin to identity in case other modes where selected before.
+                    Pose::IDENTITY
+                }
+            }
+            RecenteringMode::LocalFloor => {
+                let p = self.last_head_pose.position;
+                let position = Vec3::new(p.x, 0.0, p.z);
+
+                let o = self.last_head_pose.orientation;
                 // extract yaw rotation
-                rot.x = 0.0;
-                rot.z = 0.0;
-                rot = rot.normalize();
+                let orientation = Quat::from_xyzw(0.0, o.y, 0.0, o.w).normalize();
 
-                rot
+                Pose {
+                    position,
+                    orientation,
+                }
             }
-            RotationRecenteringMode::Tilted => self.last_head_pose.orientation,
+            RecenteringMode::Local { view_height } => {
+                let position = self.last_head_pose.position - Vec3::new(0.0, *view_height, 0.0);
+
+                let o = self.last_head_pose.orientation;
+                // extract yaw rotation
+                let orientation = Quat::from_xyzw(0.0, o.y, 0.0, o.w).normalize();
+
+                Pose {
+                    position,
+                    orientation,
+                }
+            }
+            RecenteringMode::Tilted { view_height } => {
+                let position = self.last_head_pose.position - Vec3::new(0.0, *view_height, 0.0);
+
+                Pose {
+                    position,
+                    orientation: self.last_head_pose.orientation,
+                }
+            }
         };
 
-        self.inverse_recentering_origin = Pose {
-            position,
-            orientation,
-        }
-        .inverse();
+        self.inverse_recentering_origin = recentering_origin.inverse();
     }
 
     pub fn recenter_pose(&self, pose: Pose) -> Pose {
@@ -266,6 +320,10 @@ impl TrackingManager {
             params.pose = self.inverse_recentering_origin.inverse() * params.pose;
         }
     }
+
+    fn report_markers(&mut self, markers: Vec<(String, Pose)>) {
+        self.markers = markers.into_iter().collect();
+    }
 }
 
 pub fn tracking_loop(
@@ -336,7 +394,8 @@ pub fn tracking_loop(
                 .into_option()
         };
 
-        let device_motion_keys = {
+        let device_motion_keys;
+        {
             let mut tracking_manager_lock = ctx.tracking_manager.write();
             let session_manager_lock = SESSION_MANAGER.read();
             let headset_config = &session_manager_lock.settings().headset;
@@ -355,7 +414,7 @@ pub fn tracking_loop(
                     .extend_from_slice(&body::extract_default_trackers(skeleton));
             }
 
-            let device_motion_keys = tracking
+            device_motion_keys = tracking
                 .device_motions
                 .iter()
                 .map(|(id, _)| *id)
@@ -372,6 +431,14 @@ pub fn tracking_loop(
                 timestamp,
                 &tracking.device_motions,
             );
+
+            tracking_manager_lock.report_markers(tracking.markers);
+            if matches!(
+                headset_config.recentering_mode,
+                RecenteringMode::Stage { .. }
+            ) {
+                tracking_manager_lock.recenter(&headset_config.recentering_mode);
+            };
 
             if let Some(skeleton) = tracking.hand_skeletons[0] {
                 tracking_manager_lock.report_hand_skeleton(HandType::Left, timestamp, skeleton);
@@ -403,8 +470,6 @@ pub fn tracking_loop(
                     face: tracking.face,
                 })))
             }
-
-            device_motion_keys
         };
 
         // Handle hand gestures

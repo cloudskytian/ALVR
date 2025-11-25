@@ -3,9 +3,11 @@ use alvr_common::{
     anyhow::Result,
     glam::{Quat, UVec2, Vec2},
     semver::Version,
+    settings_schema::Switch,
 };
 use alvr_session::{
-    ClientsidePostProcessingConfig, CodecType, PassthroughMode, SessionConfig, Settings,
+    ClientsidePostProcessingConfig, CodecType, PassthroughMode, RecenteringMode, SessionConfig,
+    Settings,
 };
 use serde::{Deserialize, Serialize};
 use serde_json as json;
@@ -229,6 +231,7 @@ pub struct TrackingData {
     pub hand_skeletons: [Option<[Pose; 26]>; 2],
     pub face: FaceData,
     pub body: Option<BodySkeleton>,
+    pub markers: Vec<(String, Pose)>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -327,6 +330,7 @@ pub enum FirewallRulesAction {
 pub struct RealTimeConfig {
     pub passthrough: Option<PassthroughMode>,
     pub clientside_post_processing: Option<ClientsidePostProcessingConfig>,
+    pub marker_colocation: bool,
     pub ext_str: String,
 }
 
@@ -339,6 +343,12 @@ impl RealTimeConfig {
                 .clientside_post_processing
                 .clone()
                 .into_option(),
+            marker_colocation: matches!(
+                settings.headset.recentering_mode,
+                RecenteringMode::Stage {
+                    marker_based_colocation: Switch::Enabled(_)
+                }
+            ),
             ext_str: String::new(), // No extensions for now
         }
     }
